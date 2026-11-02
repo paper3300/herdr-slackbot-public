@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "herdr-slackbot"
-version = "0.1.0"
-description = "Herdr plugin that bridges a Slack bot DM to the local Herdr session"
+version = "0.2.0"
+description = "Slack bot DM bridge for Herdr agents (Herdr app via herdr-core, or the Herdr CLI plugin)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
