@@ -69,7 +69,7 @@ class HerdrOutcomeUnknown(HerdrError):
 READ_ONLY_METHODS = frozenset({
     "ping", "agent.list", "agent.get", "agent.read", "agent.explain", "workspace.list",
     "workspace.get", "tab.list", "tab.get", "pane.list", "pane.get", "pane.current",
-    "pane.read", "pane.layout", "session.snapshot",
+    "pane.read", "pane.layout", "session.snapshot", "pane.process_info",
 })
 
 
@@ -398,28 +398,63 @@ class ReadResult:
 
 
 class HerdrClient:
-    """Typed-ish helpers over the raw request API. Results are Herdr's JSON dicts."""
+    """Typed-ish helpers over the raw request API. Results are Herdr's JSON dicts.
 
-    def __init__(self, transport):
+    This is the old `herdr` CLI backend. `hc_client.HcClient` (herdr-core / herdr app) implements
+    the same methods and returns dicts of the same shape, so the bridge does not care which runs.
+    """
+
+    backend = "herdr"
+
+    def __init__(self, transport, sessions=None):
         self.transport = transport
+        # Claude session ids from the agent's process (claude_pid.py) when Herdr reports none
+        # (its Claude integration is not installed). None disables the lookup.
+        self.sessions = sessions
 
     @classmethod
     def from_env(cls, socket_path: str | None = None, herdr_bin: str = "herdr") -> "HerdrClient":
+        from .claude_pid import SessionLocator
+
         socket_path = socket_path or os.environ.get("HERDR_SOCKET_PATH", "")
-        return cls(AutoTransport(socket_path, herdr_bin))
+        return cls(AutoTransport(socket_path, herdr_bin), SessionLocator())
 
     def request(self, method: str, params: dict | None = None) -> dict:
         return self.transport.request(method, params or {})
+
+    def _fill_session(self, info: dict) -> dict:
+        """Add `agent_session` from the Claude process when Herdr did not report one."""
+        if (self.sessions is None or not isinstance(info, dict) or info.get("agent") != "claude"
+                or ((info.get("agent_session") or {}).get("value"))):
+            return info
+        pane_id = info.get("pane_id")
+        if not pane_id:
+            return info
+
+        def pids() -> list[int]:
+            proc = self.request("pane.process_info", {"pane_id": pane_id}).get("process_info") or {}
+            found = [p.get("pid") for p in proc.get("foreground_processes") or [] if p.get("pid")]
+            if proc.get("shell_pid"):
+                found.append(proc["shell_pid"])
+            return found
+
+        session = self.sessions.session_for(info.get("terminal_id") or pane_id, pids)
+        if session:
+            info = {**info, "agent_session": {"value": session, "source": "process"}}
+        return info
 
     # --- read-only -----------------------------------------------------
     def ping(self) -> dict:
         return self.request("ping")
 
     def list_agents(self) -> list[dict]:
-        return self.request("agent.list")["agents"]
+        agents = self.request("agent.list")["agents"]
+        if self.sessions is not None:
+            self.sessions.forget(a.get("terminal_id") or a.get("pane_id") for a in agents)
+        return [self._fill_session(a) for a in agents]
 
     def get_agent(self, target: str) -> dict:
-        return self.request("agent.get", {"target": target})["agent"]
+        return self._fill_session(self.request("agent.get", {"target": target})["agent"])
 
     def find_agent(self, target: str) -> dict | None:
         try:

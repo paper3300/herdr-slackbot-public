@@ -123,7 +123,7 @@ def _run_bridge(monkeypatch, cfg_dir, on_loop, owner="UKIM"):
         def ping(self):
             return {}
 
-    monkeypatch.setattr(main_mod.HerdrClient, "from_env", classmethod(lambda cls, *a, **k: Client()))
+    monkeypatch.setattr(main_mod, "make_client", lambda cfg: Client())
     monkeypatch.setattr(P.HerdrCli, "run", lambda self, *args, **k: "")
     built = {}
 

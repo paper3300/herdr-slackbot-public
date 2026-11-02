@@ -634,7 +634,8 @@ def sent_blocks(prompt: str) -> list:
 # --- blocked dialogs (answered from Slack) -------------------------------------------------
 
 def dialog_header(name: str, workspace_label: str) -> str:
-    return f"⚠️ *{escape(name)}* · {escape(workspace_label)} is waiting for your answer"
+    where = f" · {escape(workspace_label)}" if workspace_label else ""
+    return f"⚠️ *{escape(name)}*{where} is waiting for your answer"
 
 
 def _dialog_value(token: str, choice) -> str:
@@ -750,7 +751,7 @@ def dialog_summary(dialog: Dialog | None) -> str:
 
 def dialog_closed_blocks(name: str, workspace_label: str, summary: str, outcome: str) -> list:
     """The dialog message once it is no longer open: no buttons, just what happened."""
-    return [section(f"💬 *{escape(name)}* · {escape(workspace_label)}"),
+    return [section(f"💬 *{escape(name)}*" + (f" · {escape(workspace_label)}" if workspace_label else "")),
             context(escape(summary)),
             section(outcome)]
 

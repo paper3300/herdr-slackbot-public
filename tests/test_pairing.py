@@ -497,7 +497,7 @@ def test_run_starts_in_pairing_mode_without_owner(monkeypatch, tmp_path, capsys)
         def ping(self):
             return {}
 
-    monkeypatch.setattr(main_mod.HerdrClient, "from_env", classmethod(lambda cls, *a, **k: Client()))
+    monkeypatch.setattr(main_mod, "make_client", lambda cfg: Client())
     notes = []
     monkeypatch.setattr(P.HerdrCli, "run", lambda self, *args, **k: notes.append(args) or "")
     built = {}

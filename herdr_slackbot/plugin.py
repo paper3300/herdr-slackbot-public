@@ -41,7 +41,16 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from . import procinfo
-from .config import PLUGIN_ID, REPO_ROOT, Config, ConfigError, load_config
+from .config import (
+    BACKEND_HC,
+    PLUGIN_ID,
+    REPO_ROOT,
+    Config,
+    ConfigError,
+    detect_backend,
+    hc_config_dir,
+    load_config,
+)
 from .pairing import STATE_ACTIVATING, STATE_FAILED, read_pairing, read_pairing_record
 from .state import InstanceLock, _lock_file, _unlock_file, atomic_write_text
 
@@ -147,15 +156,26 @@ def strip_verbatim(path: str) -> str:
 
 
 def discover_config_dir(cli: HerdrCli | None = None, env: dict | None = None,
-                        require_env_file: bool = False) -> Path | None:
-    """HERDR_PLUGIN_CONFIG_DIR > `herdr plugin config-dir herdr-slackbot` > the default layout.
+                        require_env_file: bool = False, backend: str | None = None) -> Path | None:
+    """HERDR_PLUGIN_CONFIG_DIR > (hc backend) %APPDATA%\\herdr-slackbot >
+    `herdr plugin config-dir herdr-slackbot` > the default layout.
 
-    With `require_env_file`, the last two only count when a `.env` already exists there
+    With `require_env_file`, the others only count when a `.env` already exists there
     (so a plain checkout keeps using the repo root).
     """
     env = os.environ if env is None else env
     if env.get("HERDR_PLUGIN_CONFIG_DIR"):
         return Path(env["HERDR_PLUGIN_CONFIG_DIR"])
+    explicit = backend or ((env.get("HERDR_BACKEND") or "").strip().lower() not in ("", "auto") and
+                           detect_backend(env))
+    if (explicit or detect_backend(env)) == BACKEND_HC:
+        path = hc_config_dir(env)
+        if not require_env_file or (path / ".env").is_file():
+            return path
+        if explicit:
+            return None
+        # hc was only guessed (installed, but we are not inside it) and has no .env: a Herdr CLI user
+        # who also has the app installed keeps finding the plugin config dir below.
     candidates: list[Path] = []
     try:
         out = (cli or HerdrCli(timeout=5)).run("plugin", "config-dir", PLUGIN_ID)
@@ -252,9 +272,10 @@ def write_runtime_record(state_dir: Path, pane_info: dict | None, env: dict | No
     record = {
         "pid": os.getpid(),
         "start": procinfo.current_start_time(),
-        "socket": env.get("HERDR_SOCKET_PATH") or "",
-        "pane_id": (pane_info or {}).get("pane_id") or env.get("HERDR_PANE_ID") or "",
-        "terminal_id": (pane_info or {}).get("terminal_id") or "",
+        "socket": env.get("HERDR_SOCKET_PATH") or env.get("HC_TERMINAL_SOCKET") or "",
+        "pane_id": ((pane_info or {}).get("pane_id") or env.get("HERDR_PANE_ID") or env.get("HC_TERMINAL_ID")
+                    or ""),
+        "terminal_id": (pane_info or {}).get("terminal_id") or env.get("HC_TERMINAL_ID") or "",
         "at": time.time(),
     }
     _write_json(Path(state_dir) / RUNTIME_FILE, record)
@@ -620,7 +641,14 @@ class PluginOps:
         self.out(f"setup wizard opened in a new tab (pane {pane_id})")
         return 0
 
+    pairing_where = "code in {workspace} pane"
+
     def status_lines(self) -> list[str]:
+        return [line for _key, line in self.status_items()]
+
+    def status_items(self) -> list[tuple[str, str]]:
+        """(key, line) pairs: `bridge`, `config`, `config_error`, `slack`, `command`, `log`."""
+        out: list[tuple[str, str]] = []
         pid = self.running_pid()
         if pid:
             rec, _ = self.verified_bridge()
@@ -637,11 +665,11 @@ class PluginOps:
             state = "starting"
         else:
             state = "stopped"
-        lines = [f"bridge: {state}"]
-        lines.append(f"config: {self.config_dir / '.env'}"
-                     + ("" if (self.config_dir / ".env").is_file() else " (missing — run setup)"))
+        out.append(("bridge", f"bridge: {state}"))
+        out.append(("config", f"config: {self.config_dir / '.env'}"
+                    + ("" if (self.config_dir / ".env").is_file() else " (missing — run setup)")))
         if self.cfg_error:
-            lines.append(f"config error: {self.cfg_error}")
+            out.append(("config_error", f"config error: {self.cfg_error}"))
         elif self.cfg is not None:
             missing = self.cfg.missing_slack_settings()
             pairing_state = (read_pairing_record(self.state_dir) or {}).get("state") if pid else None
@@ -650,15 +678,15 @@ class PluginOps:
             elif not self.cfg.needs_pairing or pairing_state in (STATE_ACTIVATING, STATE_FAILED):
                 slack = self._owner_readiness(pid, pairing_state)
             elif pid and read_pairing(self.state_dir):
-                slack = f"waiting for pairing (code in {self.workspace_label} pane)"
+                slack = f"waiting for pairing ({self.pairing_where.format(workspace=self.workspace_label)})"
             elif pid:
                 slack = "not paired yet (see the bridge pane)"
             else:
                 slack = "tokens set, not paired yet (start the bridge to get a pairing code)"
-            lines.append(f"slack: {slack}")
-            lines.append(f"command: {self.cfg.slash_command}")
-        lines.append(f"log: {self.state_dir / 'bridge.log'}")
-        return lines
+            out.append(("slack", f"slack: {slack}"))
+            out.append(("command", f"command: {self.cfg.slash_command}"))
+        out.append(("log", f"log: {self.state_dir / 'bridge.log'}"))
+        return out
 
     def _owner_readiness(self, pid, pairing_state: str | None) -> str:
         """An owner is saved: say whether the bridge really serves them (ready marker of the verified
@@ -674,17 +702,32 @@ class PluginOps:
             return "configured, but the bridge is not ready (still starting, or it failed: see the bridge pane)"
         return "configured; the bridge is not running"
 
-    def status(self, notify: bool = False) -> int:
-        lines = self.status_lines()
-        for line in lines:
-            self.out(line)
+    def status(self, notify: bool = False, as_json: bool = False) -> int:
+        items = self.status_items()
+        lines = [line for _key, line in items]
+        if as_json:
+            data = {key: line.split(": ", 1)[1] if ": " in line else line for key, line in items}
+            data["running"] = bool(self.running_pid())
+            data["ready"] = verified_ready(self.state_dir, self.start_time) is not None
+            data["backend"] = self.backend
+            data["state_dir"] = str(self.state_dir)
+            data["starting"] = self.reservation() is not None
+            self.out(json.dumps(data, ensure_ascii=False))
+        else:
+            for line in lines:
+                self.out(line)
         if notify:
             body = " · ".join(line for line in lines if not line.startswith(("config:", "log:")))
-            try:
-                self.cli.run("notification", "show", "herdr-slackbot", "--body", body)
-            except PluginError as exc:
-                self.out(f"notification failed: {exc}")
+            self.show_notification(body)
         return 0
+
+    backend = "herdr"
+
+    def show_notification(self, body: str) -> None:
+        try:
+            self.cli.run("notification", "show", "herdr-slackbot", "--body", body)
+        except PluginError as exc:
+            self.out(f"notification failed: {exc}")
 
     def _wait_released(self, timeout: float) -> bool:
         deadline = self.clock() + timeout
@@ -710,11 +753,160 @@ def plugin_root_from_env(env: dict | None = None) -> Path:
     return Path(strip_verbatim(raw)) if raw else REPO_ROOT
 
 
-def run_plugin_command(command: str, config_dir: Path | None, argv_rest: Sequence[str] = ()) -> int:
-    cli = HerdrCli()
-    config_dir = config_dir or discover_config_dir(cli) or REPO_ROOT
-    ops = PluginOps(cli, config_dir, plugin_root_from_env())
+BRIDGE_TERMINAL = "herdr-slackbot"  # hc: the bridge terminal's name (unique among live terminals)
+BRIDGE_EXIT_WAIT = 10.0  # hc: seconds a lock-less bridge terminal gets to finish before a start gives up
+
+
+class HcOps(PluginOps):
+    """Lifecycle on the Herdr app backend (herdr-core / hc).
+
+    The bridge runs as its own hc terminal (argv, no shell) named `herdr-slackbot`, without a
+    parent so it outlives whoever started it. It is shown in the app only when a space named
+    BRIDGE_WORKSPACE exists (label `herdr.space`); otherwise it runs hidden (`hc attach
+    herdr-slackbot` shows it). Locks, the startup reservation and stop requests are the same as on
+    the old CLI; a finished bridge terminal is removed before the next start instead of closing
+    a tab."""
+
+    backend = BACKEND_HC
+    pairing_where = "code shown as a Herdr app notification and in the bridge terminal"
+
+    def __init__(self, hc, config_dir: Path, plugin_root: Path | None = None, app=None, **kwargs):
+        super().__init__(None, config_dir, plugin_root, **kwargs)
+        self.hc = hc  # HcTransport (JSON-RPC requests)
+        self.app = app  # hc_client.AppView or None
+        self.socket = getattr(hc, "path", "") or ""
+
+    def _hc(self, method: str, params: dict) -> dict:
+        from .herdr_client import HerdrError, HerdrOutcomeUnknown
+
+        try:
+            return self.hc.request(method, params)
+        except HerdrOutcomeUnknown as exc:
+            raise PluginUncertain(f"{method}: {exc.message} (outcome unknown)") from exc
+        except HerdrError as exc:
+            raise PluginError(f"{method}: {exc}") from exc
+
+    def _bridge_terminals(self, all_: bool = True) -> list[dict]:
+        from .hc_client import OWNER_LABEL
+
+        result = self._hc("terminal.list", {"all": all_, "labels": {OWNER_LABEL: "bridge"}})
+        return result.get("terminals") or []
+
+    def _bridge_space(self) -> str | None:
+        data = self.app.snapshot(fresh=True) if self.app is not None else None
+        for space in (data or {}).get("spaces") or []:
+            if space.get("name") == self.workspace_label and space.get("id"):
+                return space["id"]
+        return None
+
+    def _module_argv(self, subcommand: str, *extra: str) -> list[str]:
+        return [self.python_exe, "-m", BRIDGE_MODULE, subcommand, "--config-dir", str(self.config_dir),
+                "--backend", "hc", *extra]
+
+    def _launch(self) -> int:
+        from .hc_client import OWNER_LABEL, SPACE_LABEL
+
+        pid = self.running_pid()
+        if pid:
+            self.out(f"bridge already running (pid {pid if pid is not True else '?'})")
+            return 0
+        pending = self.reservation()
+        if pending:
+            self.out("a bridge start is already in progress; not starting another")
+            return 0
+        # A bridge that just released its lock (stop / restart) may need a moment to end its process.
+        deadline = self.clock() + BRIDGE_EXIT_WAIT
+        while True:
+            live = [t for t in self._bridge_terminals() if t.get("state") == "live"]
+            if not live or self.clock() >= deadline:
+                break
+            self.sleep(0.25)
+        if live:
+            address = live[0].get("address")
+            self.out(f"a bridge terminal ({address}) is still running but holds no lock; not starting "
+                     f"another. Check it with: hc read {address}")
+            return 1
+        for term in self._bridge_terminals():
+            if term.get("state") == "finished":
+                try:  # the previous bridge's leftover terminal (its output was readable until now)
+                    self._hc("terminal.rm", {"terminal": term["address"]})
+                except PluginError:
+                    pass
+        launch_id = uuid.uuid4().hex
+        labels = {OWNER_LABEL: "bridge"}
+        space = self._bridge_space()
+        if space:
+            labels[SPACE_LABEL] = space
+        _write_json(self.state_dir / LAUNCH_FILE, {
+            "launch_id": launch_id, "active": True, "at": self.clock(), "socket": self.socket,
+            "pane_id": "", "tab_id": "", "terminal_id": "", "previous": {},
+        })
+        params = {"argv": self._module_argv("run", "--launch-id", launch_id), "name": BRIDGE_TERMINAL,
+                  "cwd": str(self.plugin_root), "labels": labels, "no_parent": True, "no_notify": True,
+                  "env": {"HERDR_BACKEND": "hc", "PYTHONUTF8": "1"}}
+        try:
+            term = self._hc("terminal.run", params)
+        except PluginUncertain:
+            self.out(f"starting the bridge terminal: outcome unknown; the start stays reserved for "
+                     f"{int(RESERVATION_TTL)}s")
+            raise
+        except PluginError:
+            ack_launch(self.state_dir, launch_id)  # hc refused it: nothing runs
+            raise
+        where = f" in space {self.workspace_label}" if space else " (hidden; `hc attach herdr-slackbot` shows it)"
+        self.out(f"bridge started in terminal {term.get('address', '?')}{where}")
+        return 0
+
+    def verified_pane(self, rec: dict):
+        address = rec.get("pane_id") or rec.get("terminal_id")
+        if not address:
+            return None
+        try:
+            term = self._hc("terminal.get", {"terminal": address})
+        except PluginError:
+            return None
+        return (None, address) if term.get("state") == "live" else None
+
+    def open_wizard(self) -> int:
+        argv = self._module_argv("wizard")
+        if self.app is not None and self.app.run("tab.new", {"name": "Slack setup", "folder": str(self.plugin_root),
+                                                             "argv": argv}) is not None:
+            self.out("setup wizard opened in a new tab")
+            return 0
+        raise PluginError("could not open a tab in the Herdr app; run the wizard in a terminal: "
+                          + subprocess.list2cmdline(argv))
+
+    def show_notification(self, body: str) -> None:
+        from .backend import write_notification
+
+        write_notification(self.state_dir, "herdr-slackbot", body)
+
+
+def make_ops(config_dir: Path, env: dict | None = None, **kwargs) -> PluginOps:
+    """Ops for the backend the config selects (HERDR_BACKEND in the environment or .env)."""
+    env = os.environ if env is None else env
     try:
+        backend = load_config(env, config_dir=Path(config_dir)).backend
+    except ConfigError:
+        backend = detect_backend(env)
+    if backend == BACKEND_HC:
+        from .hc_client import AppView, HcTransport, default_socket_path
+
+        try:
+            cfg = load_config(env, config_dir=Path(config_dir))
+            socket, app_bin = cfg.hc_socket_path or default_socket_path(env), cfg.herdr_app_bin
+        except ConfigError:
+            socket, app_bin = default_socket_path(env), "herdr-app"
+        return HcOps(HcTransport(socket), config_dir, plugin_root_from_env(env), app=AppView(app_bin), **kwargs)
+    return PluginOps(HerdrCli(), config_dir, plugin_root_from_env(env), **kwargs)
+
+
+def run_plugin_command(command: str, config_dir: Path | None, argv_rest: Sequence[str] = ()) -> int:
+    if config_dir is None:
+        backend = detect_backend()
+        config_dir = discover_config_dir(HerdrCli() if backend != BACKEND_HC else None, backend=backend) or REPO_ROOT
+    try:
+        ops = make_ops(config_dir)
         if command == "launch":
             return ops.launch()
         if command == "stop":
@@ -722,7 +914,7 @@ def run_plugin_command(command: str, config_dir: Path | None, argv_rest: Sequenc
         if command == "restart":
             return ops.restart()
         if command == "status":
-            return ops.status(notify="--notify" in argv_rest)
+            return ops.status(notify="--notify" in argv_rest, as_json="--json" in argv_rest)
         if command == "open-wizard":
             return ops.open_wizard()
     except PluginError as exc:

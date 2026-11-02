@@ -40,6 +40,7 @@ from .config import (
     normalize_slash_command,
     redact,
 )
+from .backend import hints
 from .pairing import STATE_ACTIVATING, STATE_FAILED, read_pairing, read_pairing_record
 from .setup_cmd import run_setup, update_env_file
 from .slack_manifest import build_manifest
@@ -53,11 +54,12 @@ POLL_INTERVAL = 2.0
 NO_CODE_HINT_AFTER = 60.0  # seconds without a pairing code before pointing at the bridge pane
 READY_WAIT = 60.0  # seconds the wizard waits for the bridge to report owner mode as running
 
-NOT_INTERACTIVE_TEXT = f"""The setup wizard is interactive and needs a terminal (stdin is not a console here).
+NOT_INTERACTIVE_TEMPLATE = """The setup wizard is interactive and needs a terminal (stdin is not a console here).
 Run it in a terminal instead:
-  herdr plugin action invoke setup --plugin {PLUGIN_ID}     (opens a new Herdr tab with the wizard)
+  {setup}
 or in PowerShell, from the plugin folder:
   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\setup.ps1 -Wizard"""
+NOT_INTERACTIVE_TEXT = NOT_INTERACTIVE_TEMPLATE.format(setup=hints("herdr")["setup"])  # the old Herdr CLI's
 
 APP_TOKEN_HELP = """App-Level Token (xapp-...):
   Slack app page -> Basic Information -> App-Level Tokens -> Generate Token and Scopes
@@ -154,6 +156,15 @@ class TokenSpec:
     verify: Callable[[str], str | None]
 
 
+def _config_backend(config_dir: Path) -> str:
+    from .config import detect_backend
+
+    try:
+        return load_config(config_dir=Path(config_dir)).backend
+    except ConfigError:
+        return detect_backend()
+
+
 def bridge_readiness(state_dir: Path) -> dict | None:
     """The running bridge's ready marker (owner mode started), verified against the bridge lock."""
     from .plugin import verified_ready
@@ -163,10 +174,10 @@ def bridge_readiness(state_dir: Path) -> dict | None:
 
 def restart_bridge(config_dir: Path, out: Callable[[str], None]) -> int:
     """Start the bridge, or restart it when it is running (plugin lifecycle code)."""
-    from .plugin import HerdrCli, PluginError, PluginOps, plugin_root_from_env
+    from .plugin import PluginError, make_ops
 
     try:
-        return PluginOps(HerdrCli(), config_dir, plugin_root_from_env(), out=out).restart()
+        return make_ops(config_dir, out=out).restart()
     except PluginError as exc:
         out(f"could not start the bridge: {exc}")
         return 1
@@ -179,7 +190,8 @@ class Wizard:
                  client_factory: Callable = _default_client, start_bridge: Callable[[Path, Callable], int] = restart_bridge,
                  interactive: Callable[[], bool] = stdin_is_interactive, clock: Callable[[], float] = time.time,
                  sleep: Callable[[float], None] = time.sleep, pairing_wait: float = PAIRING_WAIT,
-                 readiness: Callable[[Path], dict | None] = bridge_readiness, ready_wait: float = READY_WAIT):
+                 readiness: Callable[[Path], dict | None] = bridge_readiness, ready_wait: float = READY_WAIT,
+                 backend: str | None = None):
         self.config_dir = Path(config_dir)
         self.env_file = self.config_dir / ENV_FILE_NAME
         self.username = username or current_username()
@@ -196,6 +208,8 @@ class Wizard:
         self.pairing_wait = pairing_wait
         self.readiness = readiness
         self.ready_wait = ready_wait
+        self.backend = backend or _config_backend(self.config_dir)
+        self.hint = hints(self.backend)
 
     # --- prompts ----------------------------------------------------------------------------
     def _prompt(self, question: str, default: str = "") -> str:
@@ -221,7 +235,7 @@ class Wizard:
     # --- steps ---------------------------------------------------------------------------------
     def run(self) -> int:
         if not self.interactive():
-            self.out(NOT_INTERACTIVE_TEXT)
+            self.out(NOT_INTERACTIVE_TEMPLATE.format(setup=self.hint["setup"]))
             return 2
         self.out("herdr-slackbot setup wizard  (Ctrl+C to quit; your answers so far are kept in .env)")
         try:
@@ -240,12 +254,12 @@ class Wizard:
             return 2
         self.step_tokens(result)
         self._section("4/5 Bridge")
-        self.out("starting the bridge in Herdr workspace herdr-slack ...")
+        self.out(self.hint["starting"])
         started_at = self.clock()
         code = self.start_bridge(self.config_dir, self.out)
         if code != 0:
             self.out("The bridge did not start. Fix the problem above, then:")
-            self.out(f"  herdr plugin action invoke restart --plugin {PLUGIN_ID}")
+            self.out(f"  {self.hint['restart']}")
             return 1
         paired = self.step_pairing(started_at)
         self.step_summary(paired)
@@ -374,7 +388,7 @@ class Wizard:
         cmd = cfg.slash_command
         self.out("The bridge now waits for you to prove which Slack account is yours:")
         self.out(f"  1. In Slack, open the DM with the bot ({cfg.bot_display_name}; left sidebar -> Apps).")
-        self.out(f"  2. Send:  {cmd} pair <code>   with the code below (also shown in the herdr-slack pane).")
+        self.out(f"  2. Send:  {cmd} pair <code>   with the code below (also shown in {self.hint['code_where']}).")
         self.out(f"  Waiting up to {int(self.pairing_wait // 60)} minutes (Ctrl+C stops waiting; the bridge keeps "
                  "waiting).")
         deadline = self.clock() + self.pairing_wait
@@ -387,8 +401,8 @@ class Wizard:
                     state = (read_pairing_record(cfg.state_dir) or {}).get("state")
                     if state == STATE_FAILED:
                         self.out("  the code was accepted and saved, but the bridge could not start for you "
-                                 "(see the herdr-slack pane). Restart it:")
-                        self.out(f"    herdr plugin action invoke restart --plugin {PLUGIN_ID}")
+                                 f"(see {self.hint['bridge_where']}). Restart it:")
+                        self.out(f"    {self.hint['restart']}")
                         return False
                     if state != STATE_ACTIVATING:
                         return self.wait_ready(cfg, started_at)
@@ -403,7 +417,7 @@ class Wizard:
                     self.out(f"  pairing code:  {shown}      ->  in Slack: {cmd} pair {shown}")
                 elif shown is None and not hinted and self.clock() - started_at > NO_CODE_HINT_AFTER:
                     hinted = True
-                    self.out("  no pairing code yet; look at the bridge pane in workspace herdr-slack for errors.")
+                    self.out(f"  no pairing code yet; look at {self.hint['bridge_where']} for errors.")
                 if self.clock() >= deadline:
                     self.out("  still not paired. The bridge keeps waiting: run the pair command whenever you are "
                              "ready (restart the bridge for a new code).")
@@ -411,7 +425,7 @@ class Wizard:
                 self.sleep(POLL_INTERVAL)
         except KeyboardInterrupt:
             self.out("")
-            self.out(f"  stopped waiting. The bridge still accepts `{cmd} pair <code>` (code in the herdr-slack pane).")
+            self.out(f"  stopped waiting. The bridge still accepts `{cmd} pair <code>` (code in {self.hint['code_where']}).")
             return False
 
     def wait_ready(self, cfg, started_at: float) -> bool:
@@ -427,18 +441,18 @@ class Wizard:
                     return True
                 if (read_pairing_record(cfg.state_dir) or {}).get("state") == STATE_FAILED:
                     self.out("  the code was accepted and saved, but the bridge could not start for you "
-                             "(see the herdr-slack pane). Restart it:")
-                    self.out(f"    herdr plugin action invoke restart --plugin {PLUGIN_ID}")
+                             f"(see {self.hint['bridge_where']}). Restart it:")
+                    self.out(f"    {self.hint['restart']}")
                     return False
                 if self.clock() >= deadline:
-                    self.out(f"  the bridge did not report ready within {int(self.ready_wait)}s. Look at the bridge "
-                             "pane in workspace herdr-slack, fix the problem, then:")
-                    self.out(f"    herdr plugin action invoke restart --plugin {PLUGIN_ID}")
+                    self.out(f"  the bridge did not report ready within {int(self.ready_wait)}s. Look at "
+                             f"{self.hint['bridge_where']}, fix the problem, then:")
+                    self.out(f"    {self.hint['restart']}")
                     return False
                 self.sleep(POLL_INTERVAL)
         except KeyboardInterrupt:
             self.out("")
-            self.out(f"  stopped waiting; check with: herdr plugin action invoke status --plugin {PLUGIN_ID}")
+            self.out(f"  stopped waiting; check with: {self.hint['status']}")
             return False
 
     def step_summary(self, paired: bool) -> None:
@@ -449,9 +463,9 @@ class Wizard:
         if not paired and cfg.needs_pairing:
             self.out(f"  pairing:        run `{cfg.slash_command} pair <code>` in that DM")
         elif not paired:
-            self.out("  bridge:         not serving yet; see the bridge pane in workspace herdr-slack, then restart")
-        self.out(f"  status:         herdr plugin action invoke status --plugin {PLUGIN_ID}")
-        self.out(f"  restart:        herdr plugin action invoke restart --plugin {PLUGIN_ID}   (after editing .env)")
+            self.out(f"  bridge:         not serving yet; see {self.hint['bridge_where']}, then restart")
+        self.out(f"  status:         {self.hint['status']}")
+        self.out(f"  restart:        {self.hint['restart']}   (after editing .env)")
         self.out(f"  settings:       {self.env_file}")
 
 

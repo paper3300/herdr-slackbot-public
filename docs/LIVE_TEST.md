@@ -6,6 +6,19 @@
 
 `.venv\Scripts\python`은 플러그인 폴더 기준 경로입니다. 로컬 링크로 설치했다면 `D:\Git\herdr-slackbot`입니다.
 
+아래 1~12는 Herdr CLI(플러그인) 기준입니다. Herdr 앱에서 테스트할 때는 먼저 **0-A**를 보고, 각 단계의 `herdr plugin action invoke <x>`를 Slack bridge 탭의 버튼(또는 `scripts\herdr-slackbot.ps1 <x>`)으로, "`herdr-slack` 워크스페이스의 브리지 pane"을 탭의 **Show**(또는 `hc read herdr-slackbot`)로, Herdr 알림을 앱 토스트로 바꿔 읽습니다.
+
+## 0-A. Herdr 앱 준비
+
+- [ ] `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup.ps1 -Backend hc`를 실행합니다. 출력 끝에 "installed the Slack bridge panel"이 나오고, space `herdr-slack`에 **Slack bridge** 탭이 생깁니다.
+- [ ] space `herdr-slack`의 **Slack bridge** 탭에 패널이 보입니다(`herdr-app status`에 mod 오류가 없습니다). 토큰이 없으면 탭에 `not configured (missing ...) — Setup`이 나오고 브리지는 자동 시작하지 않습니다.
+- [ ] 탭의 **Setup**을 누르면 **Slack setup** 탭이 열리고 마법사가 돕니다(1·2·페어링을 한 번에). 설정 폴더는 `%APPDATA%\herdr-slackbot`입니다.
+- [ ] 마법사가 브리지를 시작하면 탭이 `starting…` → `waiting for pairing (...)`으로 바뀌고, 페어링 코드가 앱 토스트로 뜹니다. **Show**를 누르면 브리지 터미널(코드 상자 포함)이 보입니다.
+- [ ] 페어링 뒤 탭이 `ready (owner U...)`가 됩니다. **Restart**/**Stop**/**Start**가 동작하고, 멈춘 상태에서 `hc ls --all`에 끝난 `herdr-slackbot` 터미널이 남았다가 다음 시작 때 지워집니다.
+- [ ] Herdr 앱을 껐다 켜면 패널이 브리지를 자동으로 시작합니다(이미 돌고 있으면 그대로 둡니다).
+- [ ] 7번(PC 에이전트 알림): 보고 있는 탭에서 끝난 작업은 DM이 오지 않고, 다른 탭/숨은 하위 에이전트(`hc run`)에서 끝난 작업은 DM이 옵니다.
+- [ ] 7-1번(대화 상자): 단일 선택의 "Type something"에 한글 답을 보내면 그대로 들어갑니다. 다중 선택의 "Type something"은 영문·숫자·공백만 됩니다(그 밖은 "answer this option on the PC" 안내).
+
 ## 0. 준비
 
 - [ ] 브리지가 멈춰 있는지 확인합니다: `herdr plugin action invoke status --plugin herdr-slackbot`

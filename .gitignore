@@ -11,3 +11,8 @@ dist/
 state/
 *.log
 slack-app-manifest.json
+
+# Written by `herdr-app check` / the Herdr app into mod folders
+herdr-app/mods/*/*.d.ts
+herdr-app/mods/*/jsconfig.json
+herdr-app/mods/*/config.json

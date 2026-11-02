@@ -1,6 +1,6 @@
 # herdr-slackbot — Implementation Spec
 
-Herdr (0.8.2, Windows) plugin that bridges a Slack bot DM to the local Herdr session.
+Herdr add-on (Windows) that bridges a Slack bot DM to the local Herdr session: the Herdr CLI (plugin, 0.8.2+) or the Herdr app (herdr-core `hc`); see "Two Herdr backends" at the end.
 Python 3.11 + `slack_bolt` Socket Mode. Owner-only, one Slack app per user/PC.
 
 ## Scope
@@ -149,3 +149,44 @@ Replaces "confirm on PC": a blocked agent's dialog is answered from Slack.
   the wizard command into its shell. The wizard opens `https://api.slack.com/apps?new_app=1&manifest_json=`
   with the URL-encoded manifest (manual paste above 2000 chars), verifies tokens with `auth.test` /
   `apps.connections.open`, writes them into `.env` in place, restarts the bridge and waits for pairing.
+
+## Two Herdr backends (docs/progress/DUAL-BACKEND.md, 2026-11-02)
+The PC moved from the Herdr CLI to the Herdr desktop app; both are supported. `HERDR_BACKEND`
+(`auto` | `herdr` | `hc`, `config.detect_backend`) picks one; `backend.make_client` builds the client.
+
+- **herdr** (Herdr CLI/TUI, plugin): unchanged — `HerdrClient` over Herdr's named pipe (CLI fallback),
+  `herdr-plugin.toml` hooks/actions, `PluginOps` lifecycle, `.env` in the plugin config dir.
+  Checked against Herdr 0.9.5: every method/event used still exists; `agent.start` now returns at once
+  (`launch_pending`), which the bridge already handled (waits for session + settled status).
+- **hc** (Herdr app: herdr-app 0.1.11 + herdr-core `hc` 0.1.16): `hc_client.HcClient` implements the
+  same methods and returns the same dict shapes, so bridge / events / Slack UI are backend-agnostic.
+  - agent = live hc terminal reporting an OSC 7501 status; `pane_id` = `terminal_id` = address (`t7`);
+    `agent` from `status.app` (`claude-code` → `claude`); `state_change_seq` = `status_ms`;
+    workspace = app space (label `herdr.space`, a sub-agent takes its parent's), names via `herdr-app ls`.
+  - **D9 on hc (user decision 2026-11-02):** hc's `done` only means "turn finished". The app's own
+    status keeps the old meaning (`done` = finished unseen, `idle` once looked at), so `HcClient` turns
+    `done` into `idle` when `herdr-app ls` shows the terminal as `idle`. App not running, or the
+    terminal has no pane (hidden worker / sub-agent) → stays `done` → notified. One fresh re-read when
+    the app still shows `working` (lag).
+  - new agent: `create_tab` returns a placeholder; `start_agent` = one `terminal.run` (argv, name, cwd,
+    labels `herdr.space` + `herdr-slackbot=agent`, `no_parent`), the app adds a tab, the bridge renames
+    it via `herdr-app do tab.rename` (the app does not label terminals with their tab; found via `ls`).
+    Codex gets `--no-daemon` (otherwise its commands run outside hc).
+  - prompt = `terminal.send` (paste + Enter; `blocked` → `agent_blocked`). Dialog keys = `terminal.keys`.
+    Free text into a dialog: `submit_text` = `terminal.send` with `force` (paste + Enter in one step;
+    `paste_submits` tells the bridge not to press Enter again). Typing without Enter (multi-select
+    "Type something") only via `terminal.keys` per character, which hc limits to letters/digits/space;
+    anything else is refused (`unsupported_input`) before typing.
+  - events: hc sends `status` on every status *message*; per-terminal streams forward only word
+    changes as `pane.agent_status_changed`, the all-terminals stream reports a new agent once as
+    `pane.agent_detected`; `finished`/`lost` → `pane.exited`, `removed` → `pane.closed`.
+  - lifecycle (`plugin.HcOps`): the bridge is the hc terminal `herdr-slackbot` (argv, no shell,
+    `no_parent`), hidden unless a space named `BRIDGE_WORKSPACE` exists. Same lifecycle lock,
+    reservation and addressed stop request as the CLI; a finished bridge terminal is removed before the
+    next start; a live one without the lock blocks the start. Config dir `%APPDATA%\herdr-slackbot`.
+  - app mod `herdr-app/mods/herdr-slackbot` (installed by `setup` on hc with a `config.json`):
+    panel (own tab "Slack bridge" in space herdr-slack, created by setup: shipped layouts are read-only) with state + Show/Start|Restart/Stop/Setup, autostart on app start (unless tokens missing),
+    key commands, toasts from `STATE_DIR\notify.json` (hc has no notification API).
+- **Claude session id (both backends):** from the agent's process — terminal/pane pid (or a
+  descendant) → `~/.claude/sessions/<pid>.json` `sessionId` (`claude_pid.py`). Herdr CLI uses it only
+  when Herdr reports no `agent_session` (its Claude integration is not installed).

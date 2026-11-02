@@ -945,7 +945,7 @@ class Bridge:
         # Herdr may report a just-started agent as `unknown` for a moment: wait until it has
         # settled so the D6 gate in _admit() sees its real state.
         if info is not None:
-            info = self._wait_settled(pane_id, info, expected)
+            info = self._wait_settled(pane_id, info, expected, trust_kind=req.kind)
         if info is None:
             self._reply_safe(reply, f"🔄 *{B.escape(name)}* was replaced by a different agent while starting; "
                                     "the prompt was not sent.")
@@ -953,6 +953,10 @@ class Bridge:
         info.setdefault("workspace_id", req.workspace_id)
         info.setdefault("agent", req.kind)
         info.setdefault("name", name)
+        if info.get("agent_status") not in SETTLED and self._booting_with_trust(info, req.kind):
+            # Herdr app: the agent shows its folder-trust screen without reporting a status.
+            self._startup_dialog(req, name, info["pane_id"], reply, info=info, idle=True)
+            return
         if req.kind == KIND_CODEX:
             if self.cfg.codex_prompt_delay > 0:
                 self.sleep(self.cfg.codex_prompt_delay)  # Codex drops input pasted while it initializes
@@ -1073,7 +1077,10 @@ class Bridge:
         return merged, True
 
     def _wait_settled(self, pane_id: str, info: dict, expected: dict | None = None,
-                      timeout: float = 20.0) -> dict | None:
+                      timeout: float = 20.0, trust_kind: str | None = None) -> dict | None:
+        """Wait until the new agent reports idle/done. With `trust_kind`, stop early when it has not
+        reported any status yet but shows a folder-trust screen (Claude on the Herdr app reports
+        nothing until that is answered)."""
         expected = expected if expected is not None else {"session": session_of(info),
                                                           "terminal_id": info.get("terminal_id")}
         deadline = self.clock() + timeout
@@ -1082,7 +1089,15 @@ class Bridge:
             info, _ = self._observe(pane_id, info, expected)
             if info is None:
                 return None
+            if trust_kind and self._booting_with_trust(info, trust_kind):
+                break
         return info
+
+    def _booting_with_trust(self, info: Mapping, kind: str) -> bool:
+        if info.get("agent_status") not in (None, "unknown"):
+            return False
+        dialog = parse_dialog(self._visible(info.get("pane_id")) or "", kind)
+        return dialog is not None and dialog.kind == KIND_TRUST
 
     def _wait_for_session(self, pane_id: str, expected: dict, info: dict, attempts: int = 4) -> dict | None:
         for _ in range(attempts):
@@ -2005,16 +2020,27 @@ class Bridge:
             return False
         keys, text, enter, label = planned
         pane = info["pane_id"]
+        submits = enter and getattr(self.client, "paste_submits", False)
+        can_type = getattr(self.client, "can_type", None)
+        if text is not None and not submits and can_type is not None and not can_type(text):
+            # Herdr app: text that must not be submitted can only be typed key by key (ASCII); check
+            # before any key moves the dialog's cursor.
+            self._post_safe("⚠️ The Herdr app can only type letters, digits and spaces into this option "
+                            "without submitting it. Nothing was sent; answer it on the PC.", thread_ts)
+            return False
         try:
             if keys:
                 self.client.send_keys(pane, keys)
             if text is not None:
                 if keys:
                     self.sleep(DIALOG_KEY_GAP)  # the digit / cursor move turns the option into an input
-                self.client.send_text(pane, text)
-                if enter:
-                    self.sleep(DIALOG_KEY_GAP)
-                    self.client.send_keys(pane, ["enter"])
+                if submits:
+                    self.client.submit_text(pane, text)  # hc: paste + Enter in one step
+                else:
+                    self.client.send_text(pane, text)
+                    if enter:
+                        self.sleep(DIALOG_KEY_GAP)
+                        self.client.send_keys(pane, ["enter"])
         except HerdrError as exc:
             self._post_safe(f"❌ Could not send the answer to *{B.escape(rec.get('name') or 'agent')}*: "
                             f"{B.escape(str(exc))}. Check the screen.", thread_ts)
@@ -2303,7 +2329,7 @@ class Bridge:
                            fallback_lines=self.cfg.fallback_lines, base=self.claude_projects)
         duration = format_duration(self.clock() - since) if since else (res.duration or "")
         name = _display(info, entry)
-        header = f"✅ *{B.escape(name)}* · {B.escape(ws_label)}" + (f" · {duration}" if duration else "")
+        header = " · ".join(p for p in (f"✅ *{B.escape(name)}*", B.escape(ws_label or ""), duration) if p)
         title = (info.get("terminal_title_stripped") or info.get("terminal_title") or "").strip()
         ctx = [f"📁 `{B.escape(cwd)}`" if cwd else "", B.escape(truncate(title, 80)) if title else "",
                "_raw output_" if not res.parsed else ""]

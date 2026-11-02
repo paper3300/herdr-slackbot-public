@@ -1,13 +1,16 @@
 # Plugin hook / action entry point: runs `python -m herdr_slackbot <command>` with the plugin venv.
-#   launch   (startup hook) create workspace herdr-slack if needed and start the bridge in a fresh tab
-#   restart  stop the running bridge (addressed stop request) and start it again in a fresh tab
+#   launch   (startup hook) start the bridge (old Herdr: a fresh tab in workspace herdr-slack;
+#            Herdr app: the hc terminal herdr-slackbot)
+#   restart  stop the running bridge (addressed stop request) and start it again
 #   stop     stop the running bridge
 #   status   print bridge status (with -Notify: also as a Herdr notification)
-#   open-wizard  (setup action) open a focused tab in the current workspace running the setup wizard
+#   open-wizard  (setup action) open a tab running the setup wizard
+# -Backend auto|herdr|hc picks the Herdr backend (default: detected; see scripts\setup.ps1).
 # The venv is created on first use when missing (e.g. after `herdr plugin link`).
 param(
     [Parameter(Position = 0)][ValidateSet("launch", "restart", "stop", "status", "open-wizard")][string]$Command = "status",
-    [switch]$Notify
+    [switch]$Notify,
+    [ValidateSet("auto", "herdr", "hc")][string]$Backend = "auto"
 )
 
 $ErrorActionPreference = "Continue"
@@ -27,7 +30,7 @@ if (-not (Test-Path $py)) {
     }
 }
 
-$pyArgs = @("-m", "herdr_slackbot", $Command)
+$pyArgs = @("-m", "herdr_slackbot", $Command, "--backend", $Backend)
 if ($Notify) { $pyArgs += "--notify" }
 Push-Location $root
 try {

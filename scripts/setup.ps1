@@ -1,13 +1,17 @@
 # herdr-slackbot setup (Windows): venv + dependencies, then `python -m herdr_slackbot setup`
-# (.env skeleton in the plugin config dir without overwriting values + Slack app manifest).
+# (.env skeleton without overwriting values + Slack app manifest; on the Herdr app also the
+# Slack bridge bar mod in ~\.config\herdr-app\mods\herdr-slackbot).
 #
-#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup.ps1 [-SlashCommand /herdr-me]
-#       [-DisplayName "Herdr (me)"] [-ConfigDir <dir>] [-SkipConfig] [-Wizard]
+#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\setup.ps1 [-Backend auto|herdr|hc]
+#       [-SlashCommand /herdr-me] [-DisplayName "Herdr (me)"] [-ConfigDir <dir>] [-SkipConfig] [-Wizard]
 #
-# Also the plugin's [[build]] step (herdr plugin install runs it non-interactively).
+# -Backend: hc = Herdr desktop app (config in %APPDATA%\herdr-slackbot), herdr = old Herdr CLI
+# (plugin config dir). Default auto: the Herdr app when `hc` is installed, else the old CLI.
+# Also the old Herdr plugin's [[build]] step (herdr plugin install runs it non-interactively).
 # -Wizard runs the interactive setup wizard instead (`python -m herdr_slackbot wizard`: Slack app,
 # tokens, bridge start, pairing); it needs a terminal.
 param(
+    [ValidateSet("auto", "herdr", "hc")][string]$Backend = "auto",
     [string]$SlashCommand,
     [string]$DisplayName,
     [string]$ConfigDir,
@@ -62,7 +66,7 @@ if ($LASTEXITCODE -ne 0) {
 
 if ($SkipConfig) { exit 0 }
 
-$setupArgs = @("-m", "herdr_slackbot", $(if ($Wizard) { "wizard" } else { "setup" }))
+$setupArgs = @("-m", "herdr_slackbot", $(if ($Wizard) { "wizard" } else { "setup" }), "--backend", $Backend)
 if ($ConfigDir) { $setupArgs += @("--config-dir", $ConfigDir) }
 if ($SlashCommand) { $setupArgs += @("--slash-command", $SlashCommand) }
 if ($DisplayName) { $setupArgs += @("--display-name", $DisplayName) }

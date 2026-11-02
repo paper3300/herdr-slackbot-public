@@ -1,6 +1,9 @@
 # herdr-plugin.toml — Herdr plugin manifest for herdr-slackbot (format checked against Herdr 0.8.2:
 # `herdr api schema` PluginManifest* definitions and the installed herdr-file-viewer plugin).
 #
+# This manifest is for the Herdr CLI (TUI) only. On the Herdr desktop app (herdr-core `hc`) there are
+# no plugins: scripts\setup.ps1 -Backend hc installs the app mod herdr-app\mods\herdr-slackbot instead.
+#
 #   local:   herdr plugin link D:\Git\herdr-slackbot
 #   GitHub:  herdr plugin install <owner>/herdr-slackbot
 #
@@ -23,13 +26,13 @@ platforms = ["windows"]
 # in the plugin config dir. `herdr plugin link` may skip it; the hook then bootstraps the venv.
 [[build]]
 platforms = ["windows"]
-command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/setup.ps1"]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/setup.ps1", "-Backend", "herdr"]
 
 [[startup]]
 platforms = ["windows"]
 command = [
   "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
-  '''$r=$env:HERDR_PLUGIN_ROOT; if(-not $r){$b=$env:HERDR_BIN_PATH; if(-not $b){$b='herdr'}; $r=((& $b plugin list --json|ConvertFrom-Json).result.plugins|?{$_.plugin_id -eq 'herdr-slackbot'}).plugin_root}; if($r.StartsWith('\\?\')){$r=$r.Substring(4)}; & (Join-Path $r 'scripts\herdr-slackbot.ps1') launch; exit $LASTEXITCODE''',
+  '''$r=$env:HERDR_PLUGIN_ROOT; if(-not $r){$b=$env:HERDR_BIN_PATH; if(-not $b){$b='herdr'}; $r=((& $b plugin list --json|ConvertFrom-Json).result.plugins|?{$_.plugin_id -eq 'herdr-slackbot'}).plugin_root}; if($r.StartsWith('\\?\')){$r=$r.Substring(4)}; & (Join-Path $r 'scripts\herdr-slackbot.ps1') launch -Backend herdr; exit $LASTEXITCODE''',
 ]
 
 # Plugin actions run headless (stdin redirected, checked on Herdr 0.8.2): `setup` opens a focused tab
@@ -41,7 +44,7 @@ title = "Slack bridge: setup wizard"
 description = "Open a terminal tab with the interactive setup wizard: create the Slack app, enter tokens, start the bridge, pair your Slack account."
 command = [
   "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
-  '''$r=$env:HERDR_PLUGIN_ROOT; if(-not $r){$b=$env:HERDR_BIN_PATH; if(-not $b){$b='herdr'}; $r=((& $b plugin list --json|ConvertFrom-Json).result.plugins|?{$_.plugin_id -eq 'herdr-slackbot'}).plugin_root}; if($r.StartsWith('\\?\')){$r=$r.Substring(4)}; & (Join-Path $r 'scripts\herdr-slackbot.ps1') open-wizard; exit $LASTEXITCODE''',
+  '''$r=$env:HERDR_PLUGIN_ROOT; if(-not $r){$b=$env:HERDR_BIN_PATH; if(-not $b){$b='herdr'}; $r=((& $b plugin list --json|ConvertFrom-Json).result.plugins|?{$_.plugin_id -eq 'herdr-slackbot'}).plugin_root}; if($r.StartsWith('\\?\')){$r=$r.Substring(4)}; & (Join-Path $r 'scripts\herdr-slackbot.ps1') open-wizard -Backend herdr; exit $LASTEXITCODE''',
 ]
 
 [[actions]]
@@ -51,7 +54,7 @@ title = "Slack bridge: start"
 description = "Start the Slack bridge in workspace herdr-slack (no-op when it is already running)."
 command = [
   "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
-  '''$r=$env:HERDR_PLUGIN_ROOT; if(-not $r){$b=$env:HERDR_BIN_PATH; if(-not $b){$b='herdr'}; $r=((& $b plugin list --json|ConvertFrom-Json).result.plugins|?{$_.plugin_id -eq 'herdr-slackbot'}).plugin_root}; if($r.StartsWith('\\?\')){$r=$r.Substring(4)}; & (Join-Path $r 'scripts\herdr-slackbot.ps1') launch; exit $LASTEXITCODE''',
+  '''$r=$env:HERDR_PLUGIN_ROOT; if(-not $r){$b=$env:HERDR_BIN_PATH; if(-not $b){$b='herdr'}; $r=((& $b plugin list --json|ConvertFrom-Json).result.plugins|?{$_.plugin_id -eq 'herdr-slackbot'}).plugin_root}; if($r.StartsWith('\\?\')){$r=$r.Substring(4)}; & (Join-Path $r 'scripts\herdr-slackbot.ps1') launch -Backend herdr; exit $LASTEXITCODE''',
 ]
 
 [[actions]]
@@ -61,7 +64,7 @@ title = "Slack bridge: restart"
 description = "Stop the Slack bridge (it exits on an addressed stop request) and start it again in a fresh tab, e.g. after editing .env."
 command = [
   "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
-  '''$r=$env:HERDR_PLUGIN_ROOT; if(-not $r){$b=$env:HERDR_BIN_PATH; if(-not $b){$b='herdr'}; $r=((& $b plugin list --json|ConvertFrom-Json).result.plugins|?{$_.plugin_id -eq 'herdr-slackbot'}).plugin_root}; if($r.StartsWith('\\?\')){$r=$r.Substring(4)}; & (Join-Path $r 'scripts\herdr-slackbot.ps1') restart; exit $LASTEXITCODE''',
+  '''$r=$env:HERDR_PLUGIN_ROOT; if(-not $r){$b=$env:HERDR_BIN_PATH; if(-not $b){$b='herdr'}; $r=((& $b plugin list --json|ConvertFrom-Json).result.plugins|?{$_.plugin_id -eq 'herdr-slackbot'}).plugin_root}; if($r.StartsWith('\\?\')){$r=$r.Substring(4)}; & (Join-Path $r 'scripts\herdr-slackbot.ps1') restart -Backend herdr; exit $LASTEXITCODE''',
 ]
 
 [[actions]]
@@ -71,7 +74,7 @@ title = "Slack bridge: stop"
 description = "Stop the Slack bridge."
 command = [
   "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
-  '''$r=$env:HERDR_PLUGIN_ROOT; if(-not $r){$b=$env:HERDR_BIN_PATH; if(-not $b){$b='herdr'}; $r=((& $b plugin list --json|ConvertFrom-Json).result.plugins|?{$_.plugin_id -eq 'herdr-slackbot'}).plugin_root}; if($r.StartsWith('\\?\')){$r=$r.Substring(4)}; & (Join-Path $r 'scripts\herdr-slackbot.ps1') stop; exit $LASTEXITCODE''',
+  '''$r=$env:HERDR_PLUGIN_ROOT; if(-not $r){$b=$env:HERDR_BIN_PATH; if(-not $b){$b='herdr'}; $r=((& $b plugin list --json|ConvertFrom-Json).result.plugins|?{$_.plugin_id -eq 'herdr-slackbot'}).plugin_root}; if($r.StartsWith('\\?\')){$r=$r.Substring(4)}; & (Join-Path $r 'scripts\herdr-slackbot.ps1') stop -Backend herdr; exit $LASTEXITCODE''',
 ]
 
 [[actions]]
@@ -81,5 +84,5 @@ title = "Slack bridge: status"
 description = "Show whether the Slack bridge is running and whether its Slack settings are complete."
 command = [
   "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
-  '''$r=$env:HERDR_PLUGIN_ROOT; if(-not $r){$b=$env:HERDR_BIN_PATH; if(-not $b){$b='herdr'}; $r=((& $b plugin list --json|ConvertFrom-Json).result.plugins|?{$_.plugin_id -eq 'herdr-slackbot'}).plugin_root}; if($r.StartsWith('\\?\')){$r=$r.Substring(4)}; & (Join-Path $r 'scripts\herdr-slackbot.ps1') status -Notify; exit $LASTEXITCODE''',
+  '''$r=$env:HERDR_PLUGIN_ROOT; if(-not $r){$b=$env:HERDR_BIN_PATH; if(-not $b){$b='herdr'}; $r=((& $b plugin list --json|ConvertFrom-Json).result.plugins|?{$_.plugin_id -eq 'herdr-slackbot'}).plugin_root}; if($r.StartsWith('\\?\')){$r=$r.Substring(4)}; & (Join-Path $r 'scripts\herdr-slackbot.ps1') status -Notify -Backend herdr; exit $LASTEXITCODE''',
 ]

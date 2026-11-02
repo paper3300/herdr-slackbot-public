@@ -1,8 +1,11 @@
 """Configuration: `.env` loading and defaults.
 
-The `.env` file lives in the Herdr plugin config dir (`HERDR_PLUGIN_CONFIG_DIR`,
-see `herdr plugin config-dir <id>`). When that variable is not set (running from
-a checkout), the repository root is used instead.
+Two Herdr backends are supported (HERDR_BACKEND, see `detect_backend`):
+- `herdr`: the old Herdr CLI/TUI. `.env` lives in the plugin config dir (`HERDR_PLUGIN_CONFIG_DIR`,
+  see `herdr plugin config-dir <id>`).
+- `hc`: the Herdr desktop app (herdr-core, `hc`). `.env` lives in `%APPDATA%\\herdr-slackbot`.
+The launcher passes the chosen dir as `--config-dir` (exported as HERDR_PLUGIN_CONFIG_DIR inside
+this process). When nothing is set (running from a checkout), the repository root is used.
 
 Real process environment variables win over values from the `.env` file.
 """
@@ -12,13 +15,51 @@ from __future__ import annotations
 import getpass
 import os
 import re
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping
+from typing import Callable, Mapping
 
 PLUGIN_ID = "herdr-slackbot"
 ENV_FILE_NAME = ".env"
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+BACKEND_HERDR = "herdr"  # old Herdr CLI / TUI (plugin manifest, named pipe API)
+BACKEND_HC = "hc"  # Herdr desktop app: herdr-core (`hc`) + herdr-app
+BACKENDS = (BACKEND_HERDR, BACKEND_HC)
+_BACKEND_ALIASES = {"herdr": BACKEND_HERDR, "cli": BACKEND_HERDR, "tui": BACKEND_HERDR,
+                    "hc": BACKEND_HC, "app": BACKEND_HC, "herdr-app": BACKEND_HC, "herdr-core": BACKEND_HC}
+
+
+def normalize_backend(value: str) -> str:
+    backend = _BACKEND_ALIASES.get((value or "").strip().lower())
+    if backend is None:
+        raise ConfigError(f"HERDR_BACKEND {value!r} must be auto, herdr or hc")
+    return backend
+
+
+def detect_backend(env: Mapping[str, str] | None = None,
+                   which: Callable[[str], str | None] = shutil.which) -> str:
+    """HERDR_BACKEND if set (not `auto`); else where we run (inside an old Herdr pane / plugin
+    command, or inside an hc terminal); else which program is installed (hc first)."""
+    env = os.environ if env is None else env
+    explicit = (env.get("HERDR_BACKEND") or "").strip()
+    if explicit and explicit.lower() != "auto":
+        return normalize_backend(explicit)
+    if env.get("HERDR_SOCKET_PATH") or env.get("HERDR_PLUGIN_ROOT") or env.get("HERDR_PANE_ID"):
+        return BACKEND_HERDR
+    if env.get("HC_TERMINAL_ID") or env.get("HC_TERMINAL_SOCKET"):
+        return BACKEND_HC
+    if which("hc") or which("herdr-app"):
+        return BACKEND_HC
+    return BACKEND_HERDR
+
+
+def hc_config_dir(env: Mapping[str, str] | None = None) -> Path:
+    """The hc backend's config dir: %APPDATA%\\herdr-slackbot (~/.config/herdr-slackbot elsewhere)."""
+    env = os.environ if env is None else env
+    appdata = env.get("APPDATA")
+    return Path(appdata) / PLUGIN_ID if appdata else Path.home() / ".config" / PLUGIN_ID
 
 # Slack slash command names: lowercase, max 32 chars including the leading "/".
 SLASH_COMMAND_MAX_LEN = 32
@@ -28,7 +69,7 @@ SETTING_KEYS = (
     "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "SLACK_OWNER_USER_ID",
     "SLASH_COMMAND", "BOT_DISPLAY_NAME", "STATE_DIR", "LOG_LEVEL",
     "RESULT_MAX_CHARS", "FALLBACK_LINES", "READ_LINES",
-    "HERDR_SOCKET_PATH", "HERDR_BIN",
+    "HERDR_SOCKET_PATH", "HERDR_BIN", "HERDR_BACKEND", "HC_SOCKET_PATH", "HC_BIN", "HERDR_APP_BIN",
     "BRIDGE_WORKSPACE", "START_TIMEOUT_MS", "CODEX_PROMPT_DELAY", "STALL_WAIT",
 )
 
@@ -160,6 +201,10 @@ class Config:
     slack_owner_user_id: str = ""
     herdr_socket_path: str = ""
     herdr_bin: str = "herdr"
+    backend: str = BACKEND_HERDR
+    hc_socket_path: str = ""
+    hc_bin: str = "hc"
+    herdr_app_bin: str = "herdr-app"
     log_level: str = "INFO"
     result_max_chars: int = 3000
     fallback_lines: int = 40
@@ -214,6 +259,10 @@ def load_config(env: Mapping[str, str] | None = None, config_dir: Path | None = 
         slack_owner_user_id=values.get("SLACK_OWNER_USER_ID", ""),
         herdr_socket_path=values.get("HERDR_SOCKET_PATH", ""),
         herdr_bin=values.get("HERDR_BIN") or "herdr",
+        backend=detect_backend({**env, "HERDR_BACKEND": values.get("HERDR_BACKEND", "")}),
+        hc_socket_path=values.get("HC_SOCKET_PATH", ""),
+        hc_bin=values.get("HC_BIN") or "hc",
+        herdr_app_bin=values.get("HERDR_APP_BIN") or "herdr-app",
         log_level=(values.get("LOG_LEVEL") or "INFO").upper(),
         result_max_chars=_int(values, "RESULT_MAX_CHARS", 3000),
         fallback_lines=_int(values, "FALLBACK_LINES", 40),

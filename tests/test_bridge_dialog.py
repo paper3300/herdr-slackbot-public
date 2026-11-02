@@ -337,6 +337,25 @@ def test_free_text_via_thread_reply(env):
     assert "answered from Slack" in last_text(updates_of(env, rec["message_ts"])[-1])
 
 
+def test_free_text_on_the_herdr_app_pastes_and_submits_in_one_step(env):
+    """hc backend (`paste_submits`): `terminal.send` pastes and presses Enter itself, so no separate
+    Enter follows (it would hit the next screen)."""
+    rec = block(env, PLAN)
+    env.herdr.paste_submits = True
+
+    def submit_text(pane_id, text):
+        env.herdr.calls.append(("submit_text", pane_id, text))
+        env.herdr.set_status(pane_id, "working")
+        env.herdr.visible[pane_id] = "● replanning"
+        return {"started": True}
+
+    env.herdr.submit_text = submit_text
+    env.bridge.handle_dm_message("D-OWNER", "UOWNER", "use a smaller step", "9.9", rec["thread_ts"])
+    assert [c for c in env.herdr.calls if c[0] in ("send_keys", "send_text", "submit_text")] == [
+        ("send_keys", "w1:p1", ["3"]), ("submit_text", "w1:p1", "use a smaller step")]
+    assert "answered from Slack" in last_text(updates_of(env, rec["message_ts"])[-1])
+
+
 def test_thread_reply_without_a_free_text_option(env):
     rec = block(env, PERMISSION)
     env.bridge.handle_dm_message("D-OWNER", "UOWNER", "yes please", "9.9", rec["thread_ts"])
@@ -472,6 +491,35 @@ def test_codex_startup_trust_reported_idle(env):
     assert "answered from Slack" in last_text(updates_of(env, rec["message_ts"])[-1])
     assert env.herdr.prompts() == [("prompt_agent", "w2:p50", "hi codex")]
     assert env.cfg.codex_prompt_delay in env.sleeps
+
+
+def test_claude_startup_trust_on_the_herdr_app_reports_no_status(env):
+    """Herdr app: Claude reports no status (unknown) while its folder-trust screen is up, and
+    start_agent does not raise: the trust screen still becomes the startup dialog."""
+    def start(name, kind, pane_id, args=(), timeout_ms=None):
+        env.herdr.calls.append(("start_agent", name, kind, pane_id, list(args)))
+        info = env.herdr.add_agent(pane_id, "unknown", name=name, kind=kind, session=False)
+        env.herdr.visible[pane_id] = CLAUDE_TRUST
+        return {"type": "agent_started", "agent": dict(info)}
+    env.herdr.start_agent = start
+    reply = replies(env, "new Main hello app")
+    assert "waiting for an answer during startup" in reply
+    assert env.herdr.prompts() == []
+    key = env.state.find_session_by_thread("D-OWNER", env.transport.posts[0]["ts"])
+    entry = env.state.get_thread(key)
+    assert entry["dialog"]["kind"] == "trust" and entry["deferred_prompt"]["text"] == "hello app"
+
+
+def test_multi_select_text_the_herdr_app_cannot_type_presses_nothing(env):
+    rec = block(env, ASK_MULTI)
+    env.herdr.can_type = lambda text: False
+    env.bridge.dialog_action(f"{B.ACTION_DIALOG_TEXT}3", json.dumps({"t": rec["token"], "o": 3}), "TRIG",
+                             "D-OWNER", message(rec))  # 4. Type something
+    view = env.transport.views_opened[-1]["view"]
+    view["state"] = {"values": {B.BLOCK_DIALOG_TEXT: {B.ACTION_VALUE: {"value": "초록"}}}}
+    env.bridge.submit_dialog_text(view)
+    assert env.herdr.inputs() == []
+    assert "answer it on the PC" in env.transport.posts[-1]["text"]
 
 
 def test_codex_start_without_trust_screen_prompts_directly(env):

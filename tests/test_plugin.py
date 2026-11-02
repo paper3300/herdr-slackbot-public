@@ -227,13 +227,14 @@ def test_manifest_hooks_and_actions_call_the_wrapper():
                 "status": "status -Notify"}
     for action in MANIFEST["actions"]:
         script = action["command"][-1]
-        assert "herdr-slackbot.ps1') " + expected[action["id"]] + ";" in script
+        # the plugin runs on the Herdr CLI: the backend is pinned, never auto-detected
+        assert "herdr-slackbot.ps1') " + expected[action["id"]] + " -Backend herdr;" in script
         assert "'herdr-slackbot'" in script  # plugin_list fallback looks up our own id
         assert action["title"] and action["platforms"] == ["windows"]
     (startup,) = MANIFEST["startup"]
-    assert "herdr-slackbot.ps1') launch;" in startup["command"][-1]
+    assert "herdr-slackbot.ps1') launch -Backend herdr;" in startup["command"][-1]
     (build,) = MANIFEST["build"]
-    assert build["command"][-1] == "scripts/setup.ps1"
+    assert build["command"][-3:] == ["scripts/setup.ps1", "-Backend", "herdr"]
     assert (REPO_ROOT / "scripts" / "setup.ps1").is_file()
     wrapper = (REPO_ROOT / "scripts" / "herdr-slackbot.ps1").read_text(encoding="utf-8")
     assert 'ValidateSet("launch", "restart", "stop", "status", "open-wizard")' in wrapper
@@ -273,7 +274,7 @@ def test_discover_config_dir(tmp_path):
                 raise P.PluginError("plugin_not_found")
             return self.out
 
-    env = {"APPDATA": str(tmp_path)}
+    env = {"APPDATA": str(tmp_path), "HERDR_BACKEND": "herdr"}
     default = tmp_path / "herdr" / "plugins" / "config" / PLUGIN_ID
     assert P.discover_config_dir(Cli(), {"HERDR_PLUGIN_CONFIG_DIR": "X:\\c", **env}) == Path("X:\\c")
     assert P.discover_config_dir(Cli("\\\\?\\Y:\\conf\n"), env) == Path("Y:\\conf")
@@ -282,7 +283,11 @@ def test_discover_config_dir(tmp_path):
     default.mkdir(parents=True)
     (default / ".env").write_text("", encoding="utf-8")
     assert P.discover_config_dir(Cli(), env, require_env_file=True) == default
-    assert P.discover_config_dir(Cli(), {}) is None
+    assert P.discover_config_dir(Cli(), {"HERDR_BACKEND": "herdr"}) is None
+    # hc backend (Herdr app): its own dir under APPDATA, no `herdr plugin config-dir`
+    hc_env = {"APPDATA": str(tmp_path), "HERDR_BACKEND": "hc"}
+    assert P.discover_config_dir(None, hc_env) == tmp_path / PLUGIN_ID
+    assert P.discover_config_dir(None, hc_env, require_env_file=True) is None
 
 
 # --- launch: pane selection (M3 review #2) ------------------------------------------------
@@ -921,7 +926,7 @@ def test_run_reports_slack_auth_failure_cleanly(monkeypatch, cfg_dir, capsys):
         def get_pane(self, pane_id):
             return {"pane_id": pane_id, "terminal_id": "term-own"}
 
-    monkeypatch.setattr(main_mod.HerdrClient, "from_env", classmethod(lambda cls, *a, **k: Client()))
+    monkeypatch.setattr(main_mod, "make_client", lambda cfg: Client())
 
     def bad_app(*a, **k):
         raise BoltError("`token` is invalid (auth.test result: {'ok': False, 'error': 'invalid_auth'})")
@@ -964,8 +969,7 @@ def test_run_with_a_cancelled_launch_id_does_not_start(monkeypatch, cfg_dir, cap
     monkeypatch.setenv("HERDR_PLUGIN_CONFIG_DIR", "unused")
     state = cfg_dir / "state"
     P._write_json(state / P.LAUNCH_FILE, {"launch_id": "L1", "active": False, "cancelled": True, "at": time.time()})
-    monkeypatch.setattr(main_mod.HerdrClient, "from_env",
-                        classmethod(lambda cls, *a, **k: pytest.fail("must not touch Herdr")))
+    monkeypatch.setattr(main_mod, "make_client", lambda cfg: pytest.fail("must not touch Herdr"))
     import logging
     root = logging.getLogger()
     before = list(root.handlers)

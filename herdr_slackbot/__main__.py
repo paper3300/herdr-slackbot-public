@@ -19,8 +19,9 @@ import sys
 import threading
 from pathlib import Path
 
-from .config import SECRET_RE, Config, ConfigError, load_config, redact
-from .herdr_client import HerdrClient, HerdrError
+from .backend import make_client, notify
+from .config import BACKEND_HERDR, SECRET_RE, Config, ConfigError, load_config, redact
+from .herdr_client import HerdrError
 from .naming import agent_option_label
 
 log = logging.getLogger("herdr_slackbot")
@@ -28,15 +29,20 @@ log = logging.getLogger("herdr_slackbot")
 _SECRET_RE = SECRET_RE
 
 
+RESTART_HINT = {
+    "herdr": "herdr plugin action invoke restart --plugin herdr-slackbot",
+    "hc": "the Restart button in the Herdr app's Slack bridge tab (or: python -m herdr_slackbot restart)",
+}
+
 NOT_CONFIGURED_HELP = """The bridge is not configured yet, so it did not start (this is not a crash).
   1. scripts\\setup.ps1 in the plugin folder (writes the .env skeleton + Slack app manifest)
   2. create the Slack app from the manifest and fill the tokens into .env (see README)
-  3. herdr plugin action invoke restart --plugin herdr-slackbot"""
+  3. restart the bridge: {restart}"""
 
 SLACK_FAILED_HELP = """Slack rejected the connection, so the bridge stopped (it will not retry on its own).
 Check SLACK_BOT_TOKEN (xoxb-), SLACK_APP_TOKEN (xapp-, scope connections:write) and that
 Socket Mode is enabled for the app, in {env}.
-Then: herdr plugin action invoke restart --plugin herdr-slackbot"""
+Then restart the bridge: {restart}"""
 
 
 def slack_failure_reason(exc: BaseException) -> str | None:
@@ -97,6 +103,7 @@ def check() -> int:
     except ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
+    print(f"backend:      {cfg.backend}")
     print(f"config dir:   {cfg.config_dir}")
     print(f"state dir:    {cfg.state_dir}")
     print(f"slash cmd:    {cfg.slash_command}")
@@ -104,7 +111,7 @@ def check() -> int:
     missing = cfg.missing_slack_settings()
     print(f"slack config: {'missing ' + ', '.join(missing) if missing else 'ok'}")
     print(f"owner:        {cfg.slack_owner_user_id or 'not paired yet (the bridge starts in pairing mode)'}")
-    client = HerdrClient.from_env(cfg.herdr_socket_path or None, cfg.herdr_bin)
+    client = make_client(cfg)
     try:
         pong = client.ping()
         workspaces = {w["workspace_id"]: w["label"] for w in client.list_workspaces()}
@@ -128,9 +135,10 @@ def run(launch_id: str | None = None) -> int:
     missing = cfg.missing_slack_settings()
     if missing:
         print(f"missing settings in {cfg.env_file}: {', '.join(missing)}", file=sys.stderr)
-        print(NOT_CONFIGURED_HELP, file=sys.stderr)
+        print(NOT_CONFIGURED_HELP.format(restart=RESTART_HINT[cfg.backend]), file=sys.stderr)
         return 2
     setup_logging(cfg)
+    log.info("backend: %s", cfg.backend)
 
     from slack_sdk import WebClient
 
@@ -168,9 +176,9 @@ def run(launch_id: str | None = None) -> int:
                 log.error("%s", exc)
                 return 3
             try:
-                client = HerdrClient.from_env(cfg.herdr_socket_path or None, cfg.herdr_bin)
+                client = make_client(cfg)
                 client.ping()
-                pane_id = os.environ.get("HERDR_PANE_ID")
+                pane_id = os.environ.get("HERDR_PANE_ID") or os.environ.get("HC_TERMINAL_ID")
                 pane = None
                 if pane_id:
                     try:
@@ -186,7 +194,7 @@ def run(launch_id: str | None = None) -> int:
             except BaseException:
                 lock.release()
                 raise
-            if ack_launch(cfg.state_dir, launch_id):
+            if ack_launch(cfg.state_dir, launch_id) and cfg.backend == BACKEND_HERDR:
                 _close_previous_tab(cfg.state_dir, cfg.herdr_bin)
     except PluginError as exc:
         print(f"could not coordinate with the plugin launcher: {exc}", file=sys.stderr)
@@ -244,7 +252,7 @@ def run(launch_id: str | None = None) -> int:
         if reason is None:
             raise
         log.error("Slack connection failed: %s", reason)
-        print(SLACK_FAILED_HELP.format(env=cfg.env_file), file=sys.stderr)
+        print(SLACK_FAILED_HELP.format(env=cfg.env_file, restart=RESTART_HINT[cfg.backend]), file=sys.stderr)
         return 2
     finally:
         if handler is not None:
@@ -267,7 +275,6 @@ def make_pairing(cfg: Config):
     """Pairing mode (pairing.py): the owner is saved into `.env` in place; new codes are printed
     in this pane and shown as a Herdr notification (never logged)."""
     from .pairing import Pairing, code_banner
-    from .plugin import HerdrCli, PluginError
     from .setup_cmd import update_env_file
 
     def persist(user: str) -> None:
@@ -279,11 +286,8 @@ def make_pairing(cfg: Config):
                 else "Slack pairing saved, but the bridge could not start; restart it")
 
         def show() -> None:  # off the Slack handler thread: the CLI may be slow
-            try:
-                HerdrCli(cfg.herdr_bin, timeout=10).run("notification", "show", "herdr-slackbot", "--body", body,
-                                                        "--sound", "request")
-            except PluginError as exc:
-                log.warning("pairing notification failed: %s", exc)
+            notify(cfg.backend, cfg.state_dir, body, herdr_bin=cfg.herdr_bin, sound="request",
+                   level="info" if code else "error")
 
         threading.Thread(target=show, name="pairing-notify", daemon=True).start()
 
@@ -301,6 +305,28 @@ def _close_previous_tab(state_dir: Path, herdr_bin: str) -> None:
         print(f"herdr-slackbot: {result}")
     except Exception:
         log.exception("closing the previous bridge tab failed")
+
+
+def _launch_active(state_dir: Path, launch_id: str) -> bool:
+    """Is `launch_id` still the active (unacknowledged) start in launch.json? Read without the lock:
+    only this process acknowledges its own start, so a False answer cannot turn True."""
+    import json
+
+    try:
+        data = json.loads((Path(state_dir) / "launch.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and data.get("launch_id") == launch_id and bool(data.get("active"))
+
+
+def _backend_for(config_dir: Path) -> str:
+    """The backend the config in `config_dir` selects (environment detection when it is broken)."""
+    from .config import detect_backend
+
+    try:
+        return load_config(config_dir=Path(config_dir)).backend
+    except ConfigError:
+        return detect_backend()
 
 
 COMMANDS = ("run", "check", "setup", "wizard", "manifest", "launch", "stop", "restart", "status", "open-wizard",
@@ -351,9 +377,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--display-name", help="setup/wizard: bot display name when .env has none")
     parser.add_argument("--username", help="setup/wizard: username used for the defaults")
     parser.add_argument("--notify", action="store_true", help="status: also show a Herdr notification")
+    parser.add_argument("--backend", choices=("auto", "herdr", "hc"),
+                        help="Herdr backend: herdr (old CLI) or hc (Herdr app); default: HERDR_BACKEND / detected")
+    parser.add_argument("--json", action="store_true", help="status: one JSON object (for the Herdr app mod)")
     parser.add_argument("--launch-id", help=argparse.SUPPRESS)  # startup reservation token (plugin launch)
     args = parser.parse_args(argv)
     command = "check" if args.check else args.command
+    if args.backend and args.backend != "auto":
+        os.environ["HERDR_BACKEND"] = args.backend  # also inherited by anything this starts
 
     if command in ("setup", "wizard"):
         from .plugin import discover_config_dir
@@ -374,7 +405,8 @@ def main(argv: list[str] | None = None) -> int:
         from .plugin import run_plugin_command
 
         config_dir = _apply_config_dir(args.config_dir, discover=False)
-        return run_plugin_command(command, config_dir, ["--notify"] if args.notify else [])
+        rest = (["--notify"] if args.notify else []) + (["--json"] if args.json else [])
+        return run_plugin_command(command, config_dir, rest)
 
     _apply_config_dir(args.config_dir, discover=True)
     if command == "manifest":
@@ -409,16 +441,26 @@ def main(argv: list[str] | None = None) -> int:
         return run(args.launch_id)
     finally:
         if args.launch_id:  # exited (or failed) before/after acknowledging: never leave it reserved
-            from .config import resolve_config_dir
-            from .plugin import PluginError, ack_launch, lifecycle_lock, state_dir_for
+            _release_launch(args.launch_id)
 
-            state_dir = state_dir_for(resolve_config_dir())
-            try:
-                with lifecycle_lock(state_dir):
-                    if ack_launch(state_dir, args.launch_id):  # e.g. exited early: missing tokens
-                        _close_previous_tab(state_dir, os.environ.get("HERDR_BIN") or "herdr")
-            except PluginError:
-                ack_launch(state_dir, args.launch_id)
+
+def _release_launch(launch_id: str) -> None:
+    from .config import resolve_config_dir
+    from .plugin import PluginError, ack_launch, lifecycle_lock, state_dir_for
+
+    config_dir = resolve_config_dir()
+    state_dir = state_dir_for(config_dir)
+    if not _launch_active(state_dir, launch_id):
+        # Already acknowledged (the normal case after running): nothing to release. Don't wait for
+        # the lifecycle lock: a restart holds it while it waits for this process to end.
+        return
+    try:
+        with lifecycle_lock(state_dir):
+            # e.g. exited early: missing tokens
+            if ack_launch(state_dir, launch_id) and _backend_for(config_dir) == BACKEND_HERDR:
+                _close_previous_tab(state_dir, os.environ.get("HERDR_BIN") or "herdr")
+    except PluginError:
+        ack_launch(state_dir, launch_id)
 
 
 if __name__ == "__main__":

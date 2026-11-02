@@ -234,7 +234,12 @@ def _run_setup_locked(config_dir: Path, env_file: Path, username: str, slash_com
                        existing_text is None, added, missing, notes, paired=bool(values.get("SLACK_OWNER_USER_ID")))
 
 
-def next_steps(result: SetupResult) -> list[str]:
+def next_steps(result: SetupResult, backend: str = "herdr") -> list[str]:
+    from .backend import hints
+
+    hint = hints(backend)
+    code_where = "the bridge pane (workspace herdr-slack)" if backend != "hc" else hint["code_where"]
+    pane_word = "the bridge pane" if backend != "hc" else hint["code_where"]
     lines = [
         f"config dir:      {result.config_dir}",
         f".env:            {result.env_file} ({'created' if result.env_created else 'kept'}"
@@ -247,14 +252,14 @@ def next_steps(result: SetupResult) -> list[str]:
     ]
     if not result.missing:
         lines += ["Slack tokens are set. Restart the bridge:",
-                  f"  herdr plugin action invoke restart --plugin {PLUGIN_ID}"]
+                  f"  {hint['restart']}"]
         if not result.paired:
-            lines.append("Then pair your Slack account: the bridge pane (workspace herdr-slack) shows a code; "
+            lines.append(f"Then pair your Slack account: {code_where} shows a code; "
                          f"run `{result.slash_command} pair <code>` in Slack.")
         return lines
     lines += [
         "Easiest: the interactive setup wizard (opens a terminal tab in Herdr):",
-        f"  herdr plugin action invoke setup --plugin {PLUGIN_ID}",
+        f"  {hint['setup'].split('     ')[0]}",
         "",
         "Or by hand:",
         "  1. https://api.slack.com/apps -> Create New App -> From a manifest -> pick the workspace,",
@@ -263,20 +268,93 @@ def next_steps(result: SetupResult) -> list[str]:
         "= SLACK_APP_TOKEN",
         "  3. Install App -> Install to Workspace -> Bot User OAuth Token xoxb-... = SLACK_BOT_TOKEN",
         f"  4. Fill those into {result.env_file}",
-        f"  5. herdr plugin action invoke restart --plugin {PLUGIN_ID}   (or restart Herdr)",
-        f"  6. Pairing: the bridge pane shows a code; run `{result.slash_command} pair <code>` in Slack",
+        f"  5. {hint['restart']}   {hint['restart_or']}",
+        f"  6. Pairing: {pane_word} shows a code; run `{result.slash_command} pair <code>` in Slack",
         f"  missing now: {', '.join(result.missing)}",
     ]
     return lines
 
 
+MOD_NAME = PLUGIN_ID
+MOD_SOURCE = REPO_ROOT / "herdr-app" / "mods" / MOD_NAME
+MOD_FILES = ("main.js", "mod.json")
+
+
+def herdr_app_home(env: Mapping[str, str] | None = None) -> Path:
+    env = os.environ if env is None else env
+    return Path(env["HERDR_APP_HOME"]) if env.get("HERDR_APP_HOME") else Path.home() / ".config" / "herdr-app"
+
+
+def install_app_mod(config_dir: Path, python_exe: str | None = None, app_home: Path | None = None,
+                    source: Path = MOD_SOURCE) -> Path:
+    """Herdr app backend: copy the Slack bridge tab mod into the app's mods folder and write its
+    config.json (which Python, plugin root and config dir to use). The app reloads it on save."""
+    import json
+    import shutil
+    import sys
+
+    target = (app_home or herdr_app_home()) / "mods" / MOD_NAME
+    target.mkdir(parents=True, exist_ok=True)
+    for name in MOD_FILES:
+        shutil.copyfile(source / name, target / name)
+    config = {"python": python_exe or sys.executable, "root": str(REPO_ROOT), "config_dir": str(Path(config_dir))}
+    _atomic_write(target / "config.json", json.dumps(config, indent=1) + "\n")
+    return target
+
+
+BRIDGE_TAB_NAME = "Slack bridge"
+
+
+def ensure_app_tab(space_name: str, folder: Path = REPO_ROOT, app=None) -> str:
+    """Herdr app: the bar runs only where it is shown, and the shipped layouts are read-only, so it
+    gets its own tab in the space `space_name` (BRIDGE_WORKSPACE; the bridge terminal shows there
+    too). Creates what is missing; returns what happened."""
+    from .hc_client import AppView
+
+    app = app or AppView()
+    data = app.snapshot(fresh=True)
+    if data is None:
+        return "the Herdr app is not running: open it and run setup again to add the Slack bridge tab"
+    space = next((s for s in data.get("spaces") or [] if s.get("name") == space_name), None)
+    if space is not None and any(t.get("name") == BRIDGE_TAB_NAME for t in space.get("tabs") or []):
+        return f"the Slack bridge tab is already in space {space_name}"
+    first_tab = None
+    if space is None:
+        made = app.run("space.new", {"name": space_name, "folder": str(folder)})
+        if not made or not made.get("space"):
+            return f"could not create the space {space_name}"
+        space_id, first_tab = made["space"], made.get("tab")
+    else:
+        space_id = space["id"]
+    if app.run("tab.new", {"space": space_id, "name": BRIDGE_TAB_NAME, "mod": MOD_NAME}) is None:
+        return f"could not add the Slack bridge tab to space {space_name}"
+    if first_tab:  # the shell tab space.new made: nobody has used it
+        app.run("tab.close", {"id": first_tab, "confirmed": True})
+    return f"added the Slack bridge tab to space {space_name}"
+
+
 def main_setup(config_dir: Path, username: str | None, slash_command: str | None, display_name: str | None,
-               out: Callable[[str], None] = print) -> int:
+               out: Callable[[str], None] = print, backend: str | None = None) -> int:
+    from .config import BACKEND_HC, detect_backend
+
     try:
         result = run_setup(config_dir, username=username, slash_command=slash_command, display_name=display_name)
+        backend = backend or load_config(config_dir=Path(config_dir)).backend
     except ConfigError as exc:
         out(f"setup error: {exc}")
         return 2
-    for line in next_steps(result):
+    backend = backend or detect_backend()
+    for line in next_steps(result, backend):
         out(line)
+    if backend == BACKEND_HC:
+        try:
+            target = install_app_mod(config_dir)
+        except OSError as exc:
+            out(f"could not install the Herdr app mod: {exc}")
+            return 1
+        space_name = load_config(config_dir=Path(config_dir)).bridge_workspace
+        out("")
+        out(f"Herdr app: installed the Slack bridge panel ({target}); {ensure_app_tab(space_name)}.")
+        out(f"It runs in the '{BRIDGE_TAB_NAME}' tab of space {space_name} and starts the bridge with the app")
+        out("(Show / Start / Restart / Stop / Setup buttons).")
     return 0
