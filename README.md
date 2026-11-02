@@ -4,14 +4,15 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6)
-![Herdr 0.8.2+](https://img.shields.io/badge/Herdr-0.8.2%2B-6f42c1)
+![Herdr app (herdr-core 0.1.16+)](https://img.shields.io/badge/Herdr%20app-herdr--core%200.1.16%2B-6f42c1)
+![Herdr CLI 0.8.2+](https://img.shields.io/badge/Herdr%20CLI-0.8.2%2B-6f42c1)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB)
 
 **Control the Claude Code / Codex agents running on your PC from Slack.** Get a DM when an agent finishes, answer its permission prompt with a button, and send it the next prompt, all from your phone.
 
 ## Why
 
-Coding agents stop and wait all the time: a permission prompt, a question, a plan to approve. If you've stepped away from your desk, they sit idle until you come back. herdr-slackbot is a [Herdr](https://herdr.dev) plugin that connects those agents to a Slack bot DM, so you can keep them moving from anywhere.
+Coding agents stop and wait all the time: a permission prompt, a question, a plan to approve. If you've stepped away from your desk, they sit idle until you come back. herdr-slackbot connects the agents you run in [Herdr](https://herdr.dev) to a Slack bot DM, so you can keep them moving from anywhere.
 
 - **Notifications:** a DM when an agent finishes (✅ done) or is waiting for an answer (⚠️ blocked), with the result text included.
 - **Answer from Slack:** permission prompts, questions (AskUserQuestion) and plan approvals become **Slack buttons**.
@@ -19,14 +20,16 @@ Coding agents stop and wait all the time: a permission prompt, a question, a pla
 - **One thread per agent:** reply in the thread and your reply goes to that agent as a prompt.
 - **Private by design:** every user creates **their own Slack app**, the bot only answers **the Slack account it is paired with**, and Socket Mode means no public URL or open port.
 
+It works with the **Herdr app** (the desktop app: `herdr-app` + herdr-core `hc`), where a **Slack bridge** tab controls it, and with the older **Herdr CLI** (`herdr`) as a plugin ([Herdr CLI](docs/GUIDE.md#herdr-cli)).
+
 ```
 Slack DM ──(Socket Mode)──> herdr-slackbot bridge ──(named pipe)──> Herdr ──> claude / codex agents
-          (no public URL)     (runs in a pane of the Herdr workspace herdr-slack)
+          (no public URL)     (Herdr app: the terminal herdr-slackbot in the space herdr-slack)
 ```
 
 ## Screenshots
 
-**Home tab:** Open the bot to see the agents on your PC, grouped by workspace. Each row shows status emoji · name/pane · kind · status · terminal title. The buttons at the top start a new agent or send a prompt, and idle/done agents have their own **[Send]** button on the row.
+**Home tab:** Open the bot to see the agents on your PC, grouped by workspace. Each row shows status emoji · name · kind · status · terminal title. The buttons at the top start a new agent or send a prompt, and idle/done agents have their own **[Send]** button on the row.
 
 ![Home tab: agents grouped by workspace, with New Agent / Send / Refresh buttons](docs/images/home-tab.png)
 
@@ -40,7 +43,7 @@ Slack DM ──(Socket Mode)──> herdr-slackbot bridge ──(named pipe)─�
 
 ## Quick start
 
-1. **Requirements:** Windows 10/11, **Herdr 0.8.2 or later**, **Python 3.11 or later**. Install Python first if you don't have it.
+1. **Requirements:** Windows 10/11, the **Herdr app** (herdr-core 0.1.16 or later), **Python 3.11 or later**. Install Python first if you don't have it.
 
    ```powershell
    winget install Python.Python.3.12
@@ -48,25 +51,26 @@ Slack DM ──(Socket Mode)──> herdr-slackbot bridge ──(named pipe)─�
 
    You also need permission to create and install apps in your Slack workspace. Workspaces managed by an admin may require approval to install apps.
 
-2. **Install the plugin:** During install, Herdr runs `scripts/setup.ps1`, which creates the venv, installs dependencies and writes the config skeleton.
+2. **Install:** with the Herdr app open, clone the repo and run `scripts\setup.ps1`.
 
    ```powershell
-   herdr plugin install paper3300/herdr-slackbot
+   git clone https://github.com/paper3300/herdr-slackbot D:\Git\herdr-slackbot
+   powershell -NoProfile -ExecutionPolicy Bypass -File D:\Git\herdr-slackbot\scripts\setup.ps1 -Backend hc
    ```
 
-3. **Setup wizard:** A **Slack setup** tab opens in the current workspace and runs the wizard.
+   It creates the venv, writes the config skeleton to `%APPDATA%\herdr-slackbot`, installs the **Slack bridge** panel (a Herdr app mod) and opens it in its own tab: the space **herdr-slack** → tab **Slack bridge**.
 
-   ```powershell
-   herdr plugin action invoke setup --plugin herdr-slackbot
-   ```
+3. **Setup wizard:** click **Setup** in the Slack bridge tab. A **Slack setup** tab opens and runs the wizard.
 
-   Picking the *Slack bridge: setup wizard* action from the Herdr command palette does the same. Plugin actions cannot read input themselves (stdin is not attached), so the action opens a new tab and types the wizard command into that tab's shell.
+The wizard opens Slack's create-app page with the manifest prefilled (already have an app for this command? reuse it instead), asks for the two tokens (and checks them against Slack), starts the bridge and walks you through pairing. You can stop with Ctrl+C at any time and run it again to pick up where you left off. Details: [Setup wizard](docs/GUIDE.md#setup-wizard). Prefer to do it by hand? See [Manual setup](docs/GUIDE.md#manual-setup).
 
-The wizard opens Slack's create-app page with the manifest prefilled, asks for the two tokens (and checks them against Slack), starts the bridge and walks you through pairing. You can stop with Ctrl+C at any time and run it again to pick up where you left off. Details: [Setup wizard](docs/GUIDE.md#setup-wizard). Prefer to do it by hand? See [Manual setup](docs/GUIDE.md#manual-setup).
+From then on the **Slack bridge** tab shows the bridge's state with **Show** / **Start** / **Restart** / **Stop** / **Setup** buttons, and starts the bridge when the Herdr app starts: [The Slack bridge tab](docs/GUIDE.md#the-slack-bridge-tab).
+
+**On the Herdr CLI** instead: `herdr plugin install paper3300/herdr-slackbot`, then `herdr plugin action invoke setup --plugin herdr-slackbot`. See [Herdr CLI](docs/GUIDE.md#herdr-cli).
 
 ## Pairing
 
-The bot only accepts requests from the Slack account it's paired with. When `SLACK_OWNER_USER_ID` in `.env` is empty (as on first start), the bridge shows a 6-digit code in the `herdr-slack` pane and as a Herdr notification. Open the bot from the **Apps** list in Slack's sidebar and send this in the DM:
+The bot only accepts requests from the Slack account it's paired with. When `SLACK_OWNER_USER_ID` in `.env` is empty (as on first start), the bridge shows a 6-digit code in the wizard and as a Herdr notification. Open the bot from the **Apps** list in Slack's sidebar and send this in the DM:
 
 ```
 /herdr-kim pair 123456
@@ -87,7 +91,7 @@ Below, `/herdr` stands for your own slash command (e.g. `/herdr-kim`). Use it in
 | `/herdr` | Usage |
 
 - **Threads:** each agent gets one DM thread. Replying in it sends your reply to that agent as a prompt, or as the typed answer if it is waiting on a question.
-- **Notifications:** agents you started on the PC are covered too: finished work in tabs you aren't looking at, and every dialog. The 🔕 button mutes an agent.
+- **Notifications:** agents you started on the PC are covered too: work that finished while you weren't looking at it, and every dialog. The 🔕 button mutes an agent.
 - **Dialogs:** Claude permission prompts, AskUserQuestion (single/multiple choice, free text), plan approval, folder trust and Codex command approval all become buttons. Pressing one re-checks the screen first, so if you already answered on the PC, no keys are sent.
 - **Home tab:** a dashboard of all your agents with New Agent / Send / Refresh buttons.
 
@@ -96,27 +100,28 @@ Full command reference, result-text rules and dialog details: [User guide](docs/
 ## Security
 
 - **Owner only:** Slash commands, buttons, modals and DM messages are handled for the single user in `SLACK_OWNER_USER_ID`. Other users who try a command get a rejection only they can see.
-- **Pairing:** While the value is empty, only `/herdr pair <code>` is accepted. The code is shown only on the PC (bridge pane, Herdr notification) and never written to logs. It is a 6-digit random number compared in constant time. It is replaced after 5 wrong attempts in total or 15 minutes, and no single user can try more than 5 times in 10 minutes. Before pairing, anyone in the same workspace who knows the slash command name can attempt `pair`, so pair right after installing.
-- **Code output goes to Slack.** Agent answers, the end of the screen, working folder paths and terminal titles are posted to your Slack DM. For sensitive repositories, use 🔕 mute or turn the bridge off (`stop` action).
+- **Pairing:** While the value is empty, only `/herdr pair <code>` is accepted. The code is shown only on the PC (wizard, Herdr notification, the bridge's terminal) and never written to logs. It is a 6-digit random number compared in constant time. It is replaced after 5 wrong attempts in total or 15 minutes, and no single user can try more than 5 times in 10 minutes. Before pairing, anyone in the same workspace who knows the slash command name can attempt `pair`, so pair right after installing.
+- **Code output goes to Slack.** Agent answers, the end of the screen, working folder paths and terminal titles are posted to your Slack DM. For sensitive repositories, use 🔕 mute or stop the bridge.
 - When starting a new agent from Slack, the only permission modes available are `manual`/`acceptEdits`/`auto`/`plan`. `bypassPermissions` is not offered.
-- Tokens live only in `.env` in the plugin config folder. That file is outside the git repository, and the repo's `.gitignore` also lists `.env`. `xoxb-`/`xapp-` tokens are masked in logs.
+- Tokens live only in `.env` in the config folder (`%APPDATA%\herdr-slackbot`; Herdr CLI: the plugin config folder). That file is outside the git repository, and the repo's `.gitignore` also lists `.env`. `xoxb-`/`xapp-` tokens are masked in logs.
 - Socket Mode only uses outbound connections from your PC to Slack. There are no inbound ports or public URLs.
+- The Herdr app mod runs only the bridge's own Python (`python -m herdr_slackbot status|launch|restart|stop|open-wizard`), as set in its `config.json`.
 
 ## Documentation
 
-- [User guide](docs/GUIDE.md): setup wizard, pairing details, manual setup, start / restart, full Slack usage, troubleshooting
+- [User guide](docs/GUIDE.md): setup wizard, pairing details, the Slack bridge tab, manual setup, Herdr CLI, full Slack usage, troubleshooting
 - [docs/LIVE_TEST.md](docs/LIVE_TEST.md): checklist for your first run against real Slack
-- [docs/SPEC.md](docs/SPEC.md): design and decisions
+- [docs/SPEC.md](docs/SPEC.md): design and decisions (see "Two Herdr backends")
 
 ## Development
 
 ```powershell
 .venv\Scripts\python -m pip install pytest
 .venv\Scripts\python -m pytest -q                       # offline tests
-$env:HERDR_LIVE_TESTS=1; .venv\Scripts\python -m pytest tests/test_live.py   # against a running Herdr (read-only)
+herdr-app check herdr-app\mods\herdr-slackbot           # load and render the app mod once
 ```
 
-Design and decisions are in `docs/SPEC.md`, and per-milestone progress notes are in `docs/progress/`.
+The bridge talks to Herdr only through the client interface in `herdr_slackbot/herdr_client.py` (Herdr CLI); `herdr_slackbot/hc_client.py` implements it for the Herdr app (herdr-core JSON-RPC), and `HERDR_BACKEND` (`auto` / `hc` / `herdr`) picks one. Design and decisions are in `docs/SPEC.md`, and per-milestone progress notes are in `docs/progress/`.
 
 ## License
 

@@ -33,7 +33,7 @@ backends".
   `conftest.py` pins existing tests to the CLI backend (pytest may run inside an hc terminal).
 
 ## Verified live (no real Slack yet)
-- Herdr CLI 0.9.5 (temporary isolated session `slackbot-test`, `D:\Git\_herdr-cli-temp`): all API
+- Herdr CLI 0.9.5 (a temporary, isolated install, since removed): all API
   methods/events used exist; real `Bridge` + event manager with a fake Slack transport: PC agent
   `done` → ✅ DM with the conversation from the session JSONL (session id from the process), thread
   reply → prompt → ⏳ + ✅ in the thread.
@@ -63,11 +63,24 @@ backends".
 - Kept as a limitation: outside an hc terminal, the hc pipe name is derived from `USERNAME`
   (`\\.\pipe\herdr-core-<user>-default.sock`, matches this PC). Set `HC_SOCKET_PATH` if it differs.
 
-## Not verified yet
-- Real Slack on either backend (old `.env`/tokens are gone: run the wizard again).
-- The mod inside the running app (installed by `setup`; autostart, buttons, toasts).
-- Multi-select "Type something" on the app (ASCII-only path).
+## Real Slack on the Herdr app (2026-11-02, user)
+- `setup.ps1 -Backend hc` installed the mod. The shipped `main` layout is read-only, so the panel does
+  not dock there; it now lives in its own tab: space `herdr-slack` → tab **Slack bridge**, created by
+  setup (`setup_cmd.ensure_app_tab`). The mod's `mod.json` is `place: none`. The bridge terminal shows
+  in the same space.
+- Wizard (Setup button) → tokens → pairing: OK. `/herdr list`, new agent from Slack (tab named in the
+  space), thread reply, PC agent notifications, dialog answers: OK (checklist 1–5).
+- Restart from the panel: stop request → new bridge 4 s later, ready again; old terminal removed,
+  start acknowledged (verified in `bridge.log`).
+- Seen in the log, harmless: `updating the send modal failed: not_found` (the send modal was closed
+  before its history update; existing behavior).
 
-## Cleanup when done (user request)
-Remove the temporary Herdr CLI and every old Herdr CLI leftover: follow
-`D:\Git\_herdr-cli-temp\CLEANUP.md` (server stop, `%APPDATA%\herdr`, `%LOCALAPPDATA%\herdr`, the folder).
+## Still unverified
+- Multi-select "Type something" on the app (ASCII-only path) against a real dialog.
+- The Herdr CLI path against real Slack (only with the real bridge + fake Slack, see above).
+
+## Cleanup (2026-11-02, done)
+The temporary Herdr CLI and every old Herdr CLI leftover were removed: the temporary server was
+stopped, and `%APPDATA%\herdr`, `%LOCALAPPDATA%\herdr` and `D:\Git\_herdr-cli-temp` were deleted
+(no Herdr integration had been installed). Test terminals and probe files were removed too. The Herdr
+CLI backend stays supported in the code.
